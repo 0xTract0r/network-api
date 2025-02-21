@@ -11,50 +11,99 @@ use sha3::{Digest, Keccak256};
 
 /// Proves a program with a given node ID
 #[allow(dead_code)]
+async fn fetch_task_with_timeout(
+    client: OrchestratorClient,
+    node_id: &str,
+    thread_id: usize,
+) -> Result<ProofTask, Box<dyn std::error::Error + Send + Sync>> {
+    const STEP1_MAX_RETRIES: u32 = 300;
+    const STEP1_TIMEOUT_SECS: u64 = 2;
+    let mut fetch_retries = STEP1_MAX_RETRIES;
+
+    loop {
+        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!(
+            "[{}] Thread {} - Fetching task (Attempt {} of {})",
+            current_time,
+            thread_id,
+            STEP1_MAX_RETRIES - fetch_retries + 1,
+            STEP1_MAX_RETRIES
+        );
+
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(STEP1_TIMEOUT_SECS),
+            client.get_proof_task(node_id),
+        )
+        .await
+        {
+            Ok(Ok(task)) => {
+                println!(
+                    "[{}] Thread {} - Successfully fetched task!",
+                    current_time, thread_id
+                );
+                return Ok(task);
+            }
+            Ok(Err(e)) => {
+                println!(
+                    "[{}] Thread {} - Failed to fetch task: {}",
+                    current_time, thread_id, e
+                );
+            }
+            Err(_) => {
+                println!(
+                    "[{}] Thread {} - Request timed out after {} seconds",
+                    current_time, thread_id, STEP1_TIMEOUT_SECS
+                );
+            }
+        }
+
+        if fetch_retries <= 1 {
+            return Err("Failed to fetch proof task after all retries".into());
+        }
+        fetch_retries -= 1;
+    }
+}
+
 async fn authenticated_proving(
     node_id: &str,
     environment: &config::Environment,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = OrchestratorClient::new(environment.clone());
 
-    // 步骤1: 获取任务的重试配置
-    const STEP1_MAX_RETRIES: u32 = 300;  // 修改为实际想要的重试次数
-    const STEP1_TIMEOUT_SECS: u64 = 2;
-    let mut fetch_retries = STEP1_MAX_RETRIES;
+    // 启动多个任务获取线程
+    const NUM_THREADS: usize = 10;
+    let mut handles = Vec::with_capacity(NUM_THREADS);
 
-    let proof_task = loop {
-        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        println!(
-            "[{}] 1. Fetching a task to prove from Nexus Orchestrator... (Attempt {} of {})",
-            current_time, 
-            STEP1_MAX_RETRIES - fetch_retries + 1,
-            STEP1_MAX_RETRIES
-        );
+    for thread_id in 0..NUM_THREADS {
+        let client_clone = client.clone();
+        let node_id = node_id.to_string();
         
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(STEP1_TIMEOUT_SECS),
-            client.get_proof_task(node_id)
-        ).await {
-            Ok(Ok(task)) => break task,
-            Ok(Err(e)) => {
-                println!("[{}] Failed to fetch task: {}", current_time, e);
-            },
-            Err(_) => {
-                println!("[{}] Request timed out after {} seconds", current_time, STEP1_TIMEOUT_SECS);
-            }
-        }
+        handles.push(tokio::spawn(async move {
+            fetch_task_with_timeout(client_clone, &node_id, thread_id).await
+        }));
+    }
 
-        if fetch_retries <= 1 {
-            return Err(format!(
-                "Failed to fetch proof task after all retries"
-            ).into());
+    // 等待任意一个线程成功获取任务
+    let proof_task = tokio::select! {
+        // 对每个handle进行处理
+        result = async {
+            let mut tasks = Vec::new();
+            for handle in handles {
+                if let Ok(result) = handle.await {
+                    if let Ok(task) = result {
+                        tasks.push(task);
+                    }
+                }
+            }
+            // 返回第一个成功的任务
+            tasks.into_iter().next()
+        } => {
+            result.ok_or("All threads failed to fetch task")?
         }
-        fetch_retries -= 1;
-        println!("[{}] Retrying immediately...", current_time);
     };
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 2. Received a task to prove from Nexus Orchestrator", current_time);
+    println!("[{}] 2. Received a task to prove from Nexus Orchestrator...", current_time);
 
     let public_input: u32 = proof_task.public_inputs[0] as u32;
 
@@ -80,8 +129,8 @@ async fn authenticated_proving(
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
     
-    // 步骤6: 提交证明的重试配置 
-    const STEP6_MAX_RETRIES: u32 = 120;  // 修改为实际想要的重试次数
+    // 提交证明的重试配置 
+    const STEP6_MAX_RETRIES: u32 = 120;
     const STEP6_TIMEOUT_SECS: u64 = 5;
     const STEP6_RETRY_DELAY_SECS: u64 = 1;
     let mut submit_retries = STEP6_MAX_RETRIES;
@@ -120,17 +169,12 @@ async fn authenticated_proving(
         submit_retries -= 1;
         if submit_retries > 0 {
             let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            println!(
-                "[{}] Retrying in {} seconds...",
-                current_time, STEP6_RETRY_DELAY_SECS
-            );
+            println!("[{}] Retrying in {} seconds...", current_time, STEP6_RETRY_DELAY_SECS);
             tokio::time::sleep(tokio::time::Duration::from_secs(STEP6_RETRY_DELAY_SECS)).await;
         }
     }
 
-    Err(format!(
-        "Failed to submit proof after all retries"
-    ).into())
+    Err("Failed to submit proof after all retries".into())
 }
 
 fn anonymous_proving() -> Result<(), Box<dyn std::error::Error>> {
