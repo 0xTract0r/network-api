@@ -128,7 +128,9 @@ async fn authenticated_proving(
             let proof_bytes = proof_bytes.clone();
             let shutdown_rx = shutdown_tx.subscribe();
             let config = config.clone();
-            
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
+
             handles.push(tokio::spawn(async move {
                 submit_proof_with_timeout(
                     client, 
@@ -167,7 +169,6 @@ async fn authenticated_proving(
     }
 }
 
-// 获取任务的辅助函数
 async fn fetch_task_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
@@ -177,9 +178,12 @@ async fn fetch_task_with_timeout(
 ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>> {
     let mut fetch_retries = config.fetch_max_retries;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
-
     loop {
+        // 每次重试前先检查是否已取消
+        if shutdown_rx.try_recv().is_ok() {
+            return Err("Task cancelled - another thread succeeded".into());
+        }
+
         tokio::select! {
             _ = shutdown_rx.recv() => {
                 return Err("Task cancelled - another thread succeeded".into());
@@ -194,12 +198,10 @@ async fn fetch_task_with_timeout(
                     config.fetch_max_retries
                 );
 
-                tokio::time::timeout(
+                match tokio::time::timeout(
                     tokio::time::Duration::from_secs(config.fetch_timeout_secs),
                     client.get_proof_task(node_id),
-                ).await
-            } => {
-                match result {
+                ).await {
                     Ok(Ok(task)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                         println!(
@@ -208,7 +210,7 @@ async fn fetch_task_with_timeout(
                             thread_id,
                             "Successfully fetched task!!!".green()
                         );
-                        return Ok(task);
+                        Ok(task)
                     }
                     Ok(Err(e)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -216,6 +218,7 @@ async fn fetch_task_with_timeout(
                             "[{}] Thread {} - Failed to fetch task: {}",
                             current_time, thread_id, e
                         );
+                        Err(e.into())
                     }
                     Err(_) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -223,7 +226,13 @@ async fn fetch_task_with_timeout(
                             "[{}] Thread {} - Request timed out after {} seconds",
                             current_time, thread_id, config.fetch_timeout_secs
                         );
+                        Err("Timeout".into())
                     }
+                }
+            } => {
+                match result {
+                    Ok(task) => return Ok(task),
+                    Err(_) => {}
                 }
             }
         }
@@ -235,7 +244,6 @@ async fn fetch_task_with_timeout(
     }
 }
 
-// 提交证明的辅助函数
 async fn submit_proof_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
@@ -247,9 +255,12 @@ async fn submit_proof_with_timeout(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut submit_retries = config.submit_max_retries;
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
-
     while submit_retries > 0 {
+        // 每次重试前先检查是否已取消
+        if shutdown_rx.try_recv().is_ok() {
+            return Err("Task cancelled - another thread succeeded".into());
+        }
+
         tokio::select! {
             _ = shutdown_rx.recv() => {
                 return Err("Task cancelled - another thread succeeded".into());
@@ -264,19 +275,19 @@ async fn submit_proof_with_timeout(
                     config.submit_max_retries
                 );
 
-                tokio::time::timeout(
+                match tokio::time::timeout(
                     tokio::time::Duration::from_secs(config.submit_timeout_secs),
                     client.submit_proof(node_id, &proof_hash, proof_bytes.clone())
-                ).await
-            } => {
-                match result {
+                ).await {
                     Ok(Ok(_)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                         println!(
-                            "[{}] Thread {} - Successfully submitted proof!",
-                            current_time, thread_id
+                            "[{}] Thread {} - {}",
+                            current_time, 
+                            thread_id,
+                            "Successfully submitted proof!!!".green()
                         );
-                        return Ok(());
+                        Ok(())
                     }
                     Ok(Err(e)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -284,6 +295,7 @@ async fn submit_proof_with_timeout(
                             "[{}] Thread {} - Failed to submit proof: {}",
                             current_time, thread_id, e
                         );
+                        Err(e.into())
                     }
                     Err(_) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -291,7 +303,13 @@ async fn submit_proof_with_timeout(
                             "[{}] Thread {} - Submit timed out after {} seconds",
                             current_time, thread_id, config.submit_timeout_secs
                         );
+                        Err("Timeout".into())
                     }
+                }
+            } => {
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(_) => {}
                 }
             }
         }
