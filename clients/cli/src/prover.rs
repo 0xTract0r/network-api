@@ -322,7 +322,7 @@ async fn authenticated_proving(
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
 
-    // 提交证明
+    // 提交证明部分
     {
         let (shutdown_tx, _) = broadcast::channel(1);
         let shutdown_tx = Arc::new(shutdown_tx);
@@ -334,9 +334,8 @@ async fn authenticated_proving(
             let proof_hash = proof_hash.clone();
             let proof_bytes = proof_bytes.clone();
             let shutdown_rx = shutdown_tx.subscribe();
-            let shutdown_tx = Arc::clone(&shutdown_tx);
-            let config = config.clone();
-
+            // 直接在调用时克隆，避免中间变量
+            
             let delay = rand::random::<u64>() % 100;
             tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
 
@@ -363,11 +362,15 @@ async fn authenticated_proving(
             match result {
                 Ok(Ok(_)) => {
                     success = true;
+                    let _ = shutdown_tx.send(());  // 确保成功时发送停止信号
                     break;
                 }
                 Ok(Err(_)) | Err(_) => continue,
             }
         }
+
+        // 等待一小段时间确保其他线程收到停止信号
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         if success {
             let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
