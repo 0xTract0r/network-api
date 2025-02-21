@@ -18,35 +18,50 @@ async fn authenticated_proving(
     let client = OrchestratorClient::new(environment.clone());
 
     // 添加获取任务的重试逻辑
-    let mut retries = 5;  // 增加到5次重试
+    let mut retries = 120;  
     let proof_task = loop {
-        println!("1. Fetching a task to prove from Nexus Orchestrator... (Attempt {} of 5)", 6 - retries);
-        match client.get_proof_task(node_id).await {
-            Ok(task) => break task,
-            Err(e) => {
-                if retries <= 1 {
-                    return Err(format!("Failed to fetch proof task after all retries: {:?}", e).into());
-                }
-                retries -= 1;
-                println!("Failed to fetch task: {:?}", e);
-                println!("Retrying in 2 seconds..."); // 缩短等待时间到2秒
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("[{}] 1. Fetching a task to prove from Nexus Orchestrator... (Attempt {} of 5)", current_time, 6 - retries);
+        
+        // 使用 tokio::time::timeout 来设置超时
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),  // 2秒超时
+            client.get_proof_task(node_id)
+        ).await {
+            // 2秒内成功获取结果
+            Ok(Ok(task)) => break task,
+            // 2秒内获取失败
+            Ok(Err(e)) => {
+                println!("[{}] Failed to fetch task: {:?}", current_time, e);
+            },
+            // 超过2秒未响应
+            Err(_) => {
+                println!("[{}] Request timed out after 2 seconds", current_time);
             }
         }
+
+        if retries <= 1 {
+            return Err("Failed to fetch proof task after all retries".into());
+        }
+        retries -= 1;
+        println!("[{}] Retrying immediately...", current_time);
     };
 
-    println!("2. Received a task to prove from Nexus Orchestrator...");
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] 2. Received a task to prove from Nexus Orchestrator...", current_time);
 
     let public_input: u32 = proof_task.public_inputs[0] as u32;
 
-    println!("3. Compiling guest program...");
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] 3. Compiling guest program...", current_time);
     let elf_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join("fib_input");
     let prover =
         Stwo::<Local>::new_from_file(&elf_file_path).expect("failed to load guest program");
 
-    println!("4. Creating ZK proof with inputs");
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] 4. Creating ZK proof with inputs", current_time);
     let (view, proof) = prover
         .prove_with_input::<(), u32>(&(), &public_input)
         .expect("Failed to run prover");
@@ -56,25 +71,43 @@ async fn authenticated_proving(
     let proof_bytes = serde_json::to_vec(&proof)?;
     let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
 
-    println!("\tProof size: {} bytes", proof_bytes.len());
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
     
     // 提交证明的重试逻辑
-    let mut submit_retries = 3;
+    let mut submit_retries = 30;
     while submit_retries > 0 {
-        println!("5. Submitting ZK proof to Nexus Orchestrator... (Attempt {} of 3)", 4 - submit_retries);
-        match client.submit_proof(node_id, &proof_hash, proof_bytes.clone()).await {
-            Ok(_) => {
-                println!("{}", "6. ZK proof successfully submitted".green());
+        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("[{}] 5. Submitting ZK proof to Nexus Orchestrator... (Attempt {} of 3)", current_time, 4 - submit_retries);
+        
+        // 为提交证明也添加超时控制
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),  // 提交证明给60秒超时
+            client.submit_proof(node_id, &proof_hash, proof_bytes.clone())
+        ).await {
+            // 成功提交
+            Ok(Ok(_)) => {
+                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                println!("[{}] {}", current_time, "6. ZK proof successfully submitted".green());
                 return Ok(());
+            },
+            // 提交失败
+            Ok(Err(e)) => {
+                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                println!("[{}] Submit attempt failed: {:?}", current_time, e);
+            },
+            // 提交超时
+            Err(_) => {
+                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                println!("[{}] Submit attempt timed out after 60 seconds", current_time);
             }
-            Err(e) => {
-                println!("Submit attempt failed: {:?}", e);
-                submit_retries -= 1;
-                if submit_retries > 0 {
-                    println!("Retrying in 5 seconds...");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            }
+        }
+
+        submit_retries -= 1;
+        if submit_retries > 0 {
+            let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            println!("[{}] Retrying in 5 seconds...", current_time);
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
     }
 
