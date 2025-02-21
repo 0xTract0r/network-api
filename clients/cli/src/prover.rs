@@ -17,8 +17,24 @@ async fn authenticated_proving(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = OrchestratorClient::new(environment.clone());
 
-    println!("1. Fetching a task to prove from Nexus Orchestrator...");
-    let proof_task = client.get_proof_task(node_id).await?;
+    // 添加获取任务的重试逻辑
+    let mut retries = 5;  // 增加到5次重试
+    let proof_task = loop {
+        println!("1. Fetching a task to prove from Nexus Orchestrator... (Attempt {} of 5)", 6 - retries);
+        match client.get_proof_task(node_id).await {
+            Ok(task) => break task,
+            Err(e) => {
+                if retries <= 1 {
+                    return Err(format!("Failed to fetch proof task after all retries: {:?}", e).into());
+                }
+                retries -= 1;
+                println!("Failed to fetch task: {:?}", e);
+                println!("Retrying in 2 seconds..."); // 缩短等待时间到2秒
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    };
+
     println!("2. Received a task to prove from Nexus Orchestrator...");
 
     let public_input: u32 = proof_task.public_inputs[0] as u32;
@@ -41,13 +57,28 @@ async fn authenticated_proving(
     let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
 
     println!("\tProof size: {} bytes", proof_bytes.len());
-    println!("5. Submitting ZK proof to Nexus Orchestrator...");
-    client
-        .submit_proof(node_id, &proof_hash, proof_bytes)
-        .await?;
-    println!("{}", "6. ZK proof successfully submitted".green());
+    
+    // 提交证明的重试逻辑
+    let mut submit_retries = 3;
+    while submit_retries > 0 {
+        println!("5. Submitting ZK proof to Nexus Orchestrator... (Attempt {} of 3)", 4 - submit_retries);
+        match client.submit_proof(node_id, &proof_hash, proof_bytes.clone()).await {
+            Ok(_) => {
+                println!("{}", "6. ZK proof successfully submitted".green());
+                return Ok(());
+            }
+            Err(e) => {
+                println!("Submit attempt failed: {:?}", e);
+                submit_retries -= 1;
+                if submit_retries > 0 {
+                    println!("Retrying in 5 seconds...");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
 
-    Ok(())
+    Err("Failed to submit proof after all retries".into())
 }
 
 fn anonymous_proving() -> Result<(), Box<dyn std::error::Error>> {
