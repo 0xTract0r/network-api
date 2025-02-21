@@ -18,35 +18,105 @@ use crate::nexus_orchestrator::GetProofTaskResponse;
 use futures::stream::FuturesUnordered;
 use tokio::sync::broadcast;
 
+// 通用的并发任务处理函数
+async fn run_concurrent_task<F, Fut, T, E>(
+    num_threads: usize,
+    task_name: &str,
+    mut task_fn: F,
+) -> Result<T, Box<dyn std::error::Error>>
+where
+    F: FnMut(usize, broadcast::Receiver<()>) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, E>> + Send,
+    T: Send + 'static,
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let mut handles = Vec::with_capacity(num_threads);
+
+    // 启动多个任务线程
+    for thread_id in 0..num_threads {
+        let shutdown_rx = shutdown_tx.subscribe();
+        handles.push(tokio::spawn(async move {
+            task_fn(thread_id, shutdown_rx).await
+        }));
+    }
+
+    // 等待第一个成功的任务
+    let mut futures = FuturesUnordered::new();
+    for handle in handles {
+        futures.push(handle);
+    }
+
+    let mut success_result = None;
+    while let Some(result) = futures.next().await {
+        match result {
+            Ok(Ok(result)) => {
+                success_result = Some(result);
+                let _ = shutdown_tx.send(());
+                break;
+            }
+            Ok(Err(e)) => {
+                println!("Thread failed in {}: {}", task_name, e.into().to_string());
+            }
+            Err(e) => {
+                println!("Thread panicked in {}: {}", task_name, e);
+            }
+        }
+    }
+
+    success_result.ok_or_else(|| format!("All threads failed in {}", task_name).into())
+}
+
+// 配置结构体
+#[derive(Clone)]
+struct ProverConfig {
+    num_threads: usize,
+    fetch_max_retries: u32,
+    fetch_timeout_secs: u64,
+    submit_max_retries: u32,
+    submit_timeout_secs: u64,
+    submit_retry_delay_secs: u64,
+}
+
+impl Default for ProverConfig {
+    fn default() -> Self {
+        Self {
+            num_threads: 10,
+            fetch_max_retries: 300,
+            fetch_timeout_secs: 2,
+            submit_max_retries: 120,
+            submit_timeout_secs: 5,
+            submit_retry_delay_secs: 1,
+        }
+    }
+}
+
 async fn fetch_task_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
     thread_id: usize,
     mut shutdown_rx: broadcast::Receiver<()>,
+    config: &ProverConfig,
 ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>> {
-    const STEP1_MAX_RETRIES: u32 = 300;
-    const STEP1_TIMEOUT_SECS: u64 = 2;
-    let mut fetch_retries = STEP1_MAX_RETRIES;
+    let mut fetch_retries = config.fetch_max_retries;
 
     loop {
         tokio::select! {
-            // 检查是否收到取消信号
             _ = shutdown_rx.recv() => {
                 return Err("Task cancelled - another thread succeeded".into());
             }
-            // 正常的任务获取逻辑
             result = async {
                 let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                 println!(
                     "[{}] Thread {} - Fetching task (Attempt {} of {})",
                     current_time,
                     thread_id,
-                    STEP1_MAX_RETRIES - fetch_retries + 1,
-                    STEP1_MAX_RETRIES
+                    config.fetch_max_retries - fetch_retries + 1,
+                    config.fetch_max_retries
                 );
 
                 tokio::time::timeout(
-                    tokio::time::Duration::from_secs(STEP1_TIMEOUT_SECS),
+                    tokio::time::Duration::from_secs(config.fetch_timeout_secs),
                     client.get_proof_task(node_id),
                 ).await
             } => {
@@ -70,7 +140,7 @@ async fn fetch_task_with_timeout(
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                         println!(
                             "[{}] Thread {} - Request timed out after {} seconds",
-                            current_time, thread_id, STEP1_TIMEOUT_SECS
+                            current_time, thread_id, config.fetch_timeout_secs
                         );
                     }
                 }
@@ -84,49 +154,108 @@ async fn fetch_task_with_timeout(
     }
 }
 
+async fn submit_proof_with_timeout(
+    client: Arc<OrchestratorClient>,
+    node_id: &str,
+    proof_hash: String,
+    proof_bytes: Vec<u8>,
+    thread_id: usize,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    config: &ProverConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut submit_retries = config.submit_max_retries;
+
+    while submit_retries > 0 {
+        tokio::select! {
+            _ = shutdown_rx.recv() => {
+                return Err("Task cancelled - another thread succeeded".into());
+            }
+            result = async {
+                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                println!(
+                    "[{}] Thread {} - Submitting proof (Attempt {} of {})",
+                    current_time,
+                    thread_id,
+                    config.submit_max_retries - submit_retries + 1,
+                    config.submit_max_retries
+                );
+
+                tokio::time::timeout(
+                    tokio::time::Duration::from_secs(config.submit_timeout_secs),
+                    client.submit_proof(node_id, &proof_hash, proof_bytes.clone())
+                ).await
+            } => {
+                match result {
+                    Ok(Ok(_)) => {
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Successfully submitted proof!",
+                            current_time, thread_id
+                        );
+                        return Ok(());
+                    }
+                    Ok(Err(e)) => {
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Failed to submit proof: {}",
+                            current_time, thread_id, e
+                        );
+                    }
+                    Err(_) => {
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Submit timed out after {} seconds",
+                            current_time, thread_id, config.submit_timeout_secs
+                        );
+                    }
+                }
+            }
+        }
+
+        submit_retries -= 1;
+        if submit_retries > 0 {
+            let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            println!(
+                "[{}] Thread {} - Retrying in {} seconds...", 
+                current_time, thread_id, config.submit_retry_delay_secs
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(config.submit_retry_delay_secs)).await;
+        }
+    }
+
+    Err("Failed to submit proof after all retries".into())
+}
+
 async fn authenticated_proving(
     node_id: &str,
     environment: &config::Environment,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = Arc::new(OrchestratorClient::new(environment.clone()));
-
-    // 创建一个广播通道用于发送取消信号
-    let (shutdown_tx, _) = broadcast::channel(1);
-
-    // 启动多个任务获取线程
-    const NUM_THREADS: usize = 10;
-    let mut handles = Vec::with_capacity(NUM_THREADS);
-
-    for thread_id in 0..NUM_THREADS {
+    let config = ProverConfig::default();
+    
+    // 获取任务
+    let proof_task = {
         let client = Arc::clone(&client);
         let node_id = node_id.to_string();
-        let shutdown_rx = shutdown_tx.subscribe();
+        let config = config.clone();
         
-        handles.push(tokio::spawn(async move {
-            fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx).await
-        }));
-    }
-
-    // 等待第一个成功的任务
-    let proof_task = {
-        let mut success_task = None;
-        
-        let mut futures = FuturesUnordered::new();
-        for handle in handles {
-            futures.push(handle);
-        }
-        
-        
-        while let Some(result) = futures.next().await {
-            if let Ok(Ok(task)) = result {
-                success_task = Some(task);
-                // 发送取消信号给所有其他线程
-                let _ = shutdown_tx.send(());
-                break;
+        run_concurrent_task(
+            config.num_threads,
+            "task fetching",
+            move |thread_id, shutdown_rx| {
+                let client = Arc::clone(&client);
+                let node_id = node_id.clone();
+                async move {
+                    fetch_task_with_timeout(
+                        client,
+                        &node_id,
+                        thread_id,
+                        shutdown_rx,
+                        &config
+                    ).await
+                }
             }
-        }
-        
-        success_task.ok_or("All threads failed to fetch task")?
+        ).await?
     };
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -139,8 +268,8 @@ async fn authenticated_proving(
     let elf_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
         .join("fib_input");
-    let prover =
-        Stwo::<Local>::new_from_file(&elf_file_path).expect("failed to load guest program");
+    let prover = Stwo::<Local>::new_from_file(&elf_file_path)
+        .expect("failed to load guest program");
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] 4. Creating ZK proof with inputs", current_time);
@@ -156,52 +285,43 @@ async fn authenticated_proving(
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
     
-    // 提交证明的重试配置 
-    const STEP6_MAX_RETRIES: u32 = 120;
-    const STEP6_TIMEOUT_SECS: u64 = 5;
-    const STEP6_RETRY_DELAY_SECS: u64 = 1;
-    let mut submit_retries = STEP6_MAX_RETRIES;
-
-    while submit_retries > 0 {
-        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        println!(
-            "[{}] 5. Submitting ZK proof to Nexus Orchestrator... (Attempt {} of {})",
-            current_time,
-            STEP6_MAX_RETRIES - submit_retries + 1,
-            STEP6_MAX_RETRIES
-        );
+    // 提交证明
+    let submit_result = {
+        let client = Arc::clone(&client);
+        let node_id = node_id.to_string();
+        let config = config.clone();
         
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(STEP6_TIMEOUT_SECS),
-            client.submit_proof(node_id, &proof_hash, proof_bytes.clone())
-        ).await {
-            Ok(Ok(_)) => {
-                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                println!("[{}] {}", current_time, "6. ZK proof successfully submitted".green());
-                return Ok(());
-            },
-            Ok(Err(e)) => {
-                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                println!("[{}] Submit attempt failed: {}", current_time, e);
-            },
-            Err(_) => {
-                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                println!(
-                    "[{}] Submit attempt timed out after {} seconds",
-                    current_time, STEP6_TIMEOUT_SECS
-                );
+        run_concurrent_task(
+            config.num_threads,
+            "proof submission",
+            move |thread_id, shutdown_rx| {
+                let client = Arc::clone(&client);
+                let node_id = node_id.clone();
+                let proof_hash = proof_hash.clone();
+                let proof_bytes = proof_bytes.clone();
+                async move {
+                    submit_proof_with_timeout(
+                        client,
+                        &node_id,
+                        proof_hash,
+                        proof_bytes,
+                        thread_id,
+                        shutdown_rx,
+                        &config
+                    ).await
+                }
             }
-        }
+        ).await
+    };
 
-        submit_retries -= 1;
-        if submit_retries > 0 {
+    match submit_result {
+        Ok(_) => {
             let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            println!("[{}] Retrying in {} seconds...", current_time, STEP6_RETRY_DELAY_SECS);
-            tokio::time::sleep(tokio::time::Duration::from_secs(STEP6_RETRY_DELAY_SECS)).await;
+            println!("[{}] {}", current_time, "6. ZK proof successfully submitted".green());
+            Ok(())
         }
+        Err(e) => Err(e)
     }
-
-    Err("Failed to submit proof after all retries".into())
 }
 
 
