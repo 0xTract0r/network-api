@@ -245,20 +245,21 @@ async fn authenticated_proving(
     let config = ProverConfig::default();
     
     // 获取任务
+    // 获取任务
     let proof_task = {
-        let (shutdown_tx, _) = broadcast::channel(1);
+        let (shutdown_tx, _) = broadcast::channel(1);  // 创建 shutdown_tx 和 shutdown_rx
         let mut handles = Vec::with_capacity(config.feach_num_threads);
-        
+
         for thread_id in 0..config.feach_num_threads {
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
-            let shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_rx = shutdown_tx.subscribe();  // 使用 subscribe 获取 shutdown_rx
             let config = config.clone();
 
             tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
-            
+
             handles.push(tokio::spawn(async move {
-                fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx, &config).await
+                fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx, shutdown_tx.clone(), &config).await
             }));
         }
 
@@ -266,18 +267,19 @@ async fn authenticated_proving(
         for handle in handles {
             futures.push(handle);
         }
-        
+
         let mut success_task = None;
         while let Some(result) = futures.next().await {
             if let Ok(Ok(task)) = result {
                 success_task = Some(task);
-                let _ = shutdown_tx.send(());
+                let _ = shutdown_tx.send(());  // 一旦获取到任务，发送停止信号
                 break;
             }
         }
-        
+
         success_task.ok_or_else(|| ProverError::new("All threads failed to fetch task"))?
     };
+
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] 2. Received a task to prove from Nexus Orchestrator...", current_time);
