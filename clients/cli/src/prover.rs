@@ -18,8 +18,8 @@ async fn authenticated_proving(
     let client = OrchestratorClient::new(environment.clone());
 
     // 步骤1: 获取任务的重试配置
-    const STEP1_MAX_RETRIES: u32 = 120;  // 修改为实际想要的重试次数
-    const STEP1_TIMEOUT_SECS: u64 = 5;
+    const STEP1_MAX_RETRIES: u32 = 300;  // 修改为实际想要的重试次数
+    const STEP1_TIMEOUT_SECS: u64 = 2;
     let mut fetch_retries = STEP1_MAX_RETRIES;
 
     let proof_task = loop {
