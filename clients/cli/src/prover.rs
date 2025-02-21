@@ -75,7 +75,7 @@ async fn authenticated_proving(
     let client = Arc::new(OrchestratorClient::new(environment.clone()));
 
     // 启动多个任务获取线程
-    const NUM_THREADS: usize = 3;
+    const NUM_THREADS: usize = 10;
     let mut handles = Vec::with_capacity(NUM_THREADS);
 
     for thread_id in 0..NUM_THREADS {
