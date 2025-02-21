@@ -18,54 +18,7 @@ use crate::nexus_orchestrator::GetProofTaskResponse;
 use futures::stream::FuturesUnordered;
 use tokio::sync::broadcast;
 
-// 通用的并发任务处理函数
-async fn run_concurrent_task<F, Fut, T, E>(
-    num_threads: usize,
-    task_name: &str,
-    mut task_fn: F,
-) -> Result<T, Box<dyn std::error::Error>>
-where
-    F: FnMut(usize, broadcast::Receiver<()>) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<T, E>> + Send,
-    T: Send + 'static,
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let (shutdown_tx, _) = broadcast::channel(1);
-    let mut handles = Vec::with_capacity(num_threads);
-
-    // 启动多个任务线程
-    for thread_id in 0..num_threads {
-        let shutdown_rx = shutdown_tx.subscribe();
-        handles.push(tokio::spawn(async move {
-            task_fn(thread_id, shutdown_rx).await
-        }));
-    }
-
-    // 等待第一个成功的任务
-    let mut futures = FuturesUnordered::new();
-    for handle in handles {
-        futures.push(handle);
-    }
-
-    let mut success_result = None;
-    while let Some(result) = futures.next().await {
-        match result {
-            Ok(Ok(result)) => {
-                success_result = Some(result);
-                let _ = shutdown_tx.send(());
-                break;
-            }
-            Ok(Err(e)) => {
-                println!("Thread failed in {}: {}", task_name, e.into().to_string());
-            }
-            Err(e) => {
-                println!("Thread panicked in {}: {}", task_name, e);
-            }
-        }
-    }
-
-    success_result.ok_or_else(|| format!("All threads failed in {}", task_name).into())
-}
+use std::future::Future;
 
 // 配置结构体
 #[derive(Clone)]
@@ -91,6 +44,128 @@ impl Default for ProverConfig {
     }
 }
 
+async fn authenticated_proving(
+    node_id: &str,
+    environment: &config::Environment,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = Arc::new(OrchestratorClient::new(environment.clone()));
+    let config = ProverConfig::default();
+    
+    // 获取任务
+    let proof_task = {
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let mut handles = Vec::with_capacity(config.num_threads);
+        
+        // 启动多个获取任务的线程
+        for thread_id in 0..config.num_threads {
+            let client = Arc::clone(&client);
+            let node_id = node_id.to_string();
+            let shutdown_rx = shutdown_tx.subscribe();
+            let config = config.clone();
+            
+            handles.push(tokio::spawn(async move {
+                fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx, &config).await
+            }));
+        }
+
+        // 等待第一个成功的任务
+        let mut futures = FuturesUnordered::new();
+        for handle in handles {
+            futures.push(handle);
+        }
+        
+        let mut success_task = None;
+        while let Some(result) = futures.next().await {
+            if let Ok(Ok(task)) = result {
+                success_task = Some(task);
+                let _ = shutdown_tx.send(());
+                break;
+            }
+        }
+        
+        success_task.ok_or("All threads failed to fetch task")?
+    };
+
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] 2. Received a task to prove from Nexus Orchestrator...", current_time);
+
+    let public_input: u32 = proof_task.public_inputs[0] as u32;
+
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] 3. Compiling guest program...", current_time);
+    let elf_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("fib_input");
+    let prover = Stwo::<Local>::new_from_file(&elf_file_path)
+        .expect("failed to load guest program");
+
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] 4. Creating ZK proof with inputs", current_time);
+    let (view, proof) = prover
+        .prove_with_input::<(), u32>(&(), &public_input)
+        .expect("Failed to run prover");
+
+    assert_eq!(view.exit_code().expect("failed to retrieve exit code"), 0);
+
+    let proof_bytes = serde_json::to_vec(&proof)?;
+    let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
+
+    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
+    
+    // 提交证明
+    {
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let mut handles = Vec::with_capacity(config.num_threads);
+        
+        // 启动多个提交线程
+        for thread_id in 0..config.num_threads {
+            let client = Arc::clone(&client);
+            let node_id = node_id.to_string();
+            let proof_hash = proof_hash.clone();
+            let proof_bytes = proof_bytes.clone();
+            let shutdown_rx = shutdown_tx.subscribe();
+            let config = config.clone();
+            
+            handles.push(tokio::spawn(async move {
+                submit_proof_with_timeout(
+                    client, 
+                    &node_id,
+                    proof_hash,
+                    proof_bytes,
+                    thread_id,
+                    shutdown_rx,
+                    &config
+                ).await
+            }));
+        }
+
+        // 等待第一个成功的提交
+        let mut futures = FuturesUnordered::new();
+        for handle in handles {
+            futures.push(handle);
+        }
+
+        let mut success = false;
+        while let Some(result) = futures.next().await {
+            if let Ok(Ok(_)) = result {
+                success = true;
+                let _ = shutdown_tx.send(());
+                break;
+            }
+        }
+
+        if success {
+            let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            println!("[{}] {}", current_time, "6. ZK proof successfully submitted".green());
+            Ok(())
+        } else {
+            Err("All threads failed to submit proof".into())
+        }
+    }
+}
+
+// 获取任务的辅助函数
 async fn fetch_task_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
@@ -154,6 +229,7 @@ async fn fetch_task_with_timeout(
     }
 }
 
+// 提交证明的辅助函数
 async fn submit_proof_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
@@ -224,104 +300,6 @@ async fn submit_proof_with_timeout(
     }
 
     Err("Failed to submit proof after all retries".into())
-}
-
-async fn authenticated_proving(
-    node_id: &str,
-    environment: &config::Environment,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Arc::new(OrchestratorClient::new(environment.clone()));
-    let config = ProverConfig::default();
-    
-    // 获取任务
-    let proof_task = {
-        let client = Arc::clone(&client);
-        let node_id = node_id.to_string();
-        let config = config.clone();
-        
-        run_concurrent_task(
-            config.num_threads,
-            "task fetching",
-            move |thread_id, shutdown_rx| {
-                let client = Arc::clone(&client);
-                let node_id = node_id.clone();
-                async move {
-                    fetch_task_with_timeout(
-                        client,
-                        &node_id,
-                        thread_id,
-                        shutdown_rx,
-                        &config
-                    ).await
-                }
-            }
-        ).await?
-    };
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 2. Received a task to prove from Nexus Orchestrator...", current_time);
-
-    let public_input: u32 = proof_task.public_inputs[0] as u32;
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 3. Compiling guest program...", current_time);
-    let elf_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("fib_input");
-    let prover = Stwo::<Local>::new_from_file(&elf_file_path)
-        .expect("failed to load guest program");
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 4. Creating ZK proof with inputs", current_time);
-    let (view, proof) = prover
-        .prove_with_input::<(), u32>(&(), &public_input)
-        .expect("Failed to run prover");
-
-    assert_eq!(view.exit_code().expect("failed to retrieve exit code"), 0);
-
-    let proof_bytes = serde_json::to_vec(&proof)?;
-    let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
-    
-    // 提交证明
-    let submit_result = {
-        let client = Arc::clone(&client);
-        let node_id = node_id.to_string();
-        let config = config.clone();
-        
-        run_concurrent_task(
-            config.num_threads,
-            "proof submission",
-            move |thread_id, shutdown_rx| {
-                let client = Arc::clone(&client);
-                let node_id = node_id.clone();
-                let proof_hash = proof_hash.clone();
-                let proof_bytes = proof_bytes.clone();
-                async move {
-                    submit_proof_with_timeout(
-                        client,
-                        &node_id,
-                        proof_hash,
-                        proof_bytes,
-                        thread_id,
-                        shutdown_rx,
-                        &config
-                    ).await
-                }
-            }
-        ).await
-    };
-
-    match submit_result {
-        Ok(_) => {
-            let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            println!("[{}] {}", current_time, "6. ZK proof successfully submitted".green());
-            Ok(())
-        }
-        Err(e) => Err(e)
-    }
 }
 
 
