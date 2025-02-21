@@ -13,6 +13,7 @@ use sha3::{Digest, Keccak256};
 #[allow(dead_code)]
 
 use std::sync::Arc;
+use futures::{StreamExt, stream::FuturesUnordered};
 use crate::nexus_orchestrator::GetProofTaskResponse;
 
 async fn fetch_task_with_timeout(
@@ -75,7 +76,7 @@ async fn authenticated_proving(
     let client = Arc::new(OrchestratorClient::new(environment.clone()));
 
     // 启动多个任务获取线程
-    const NUM_THREADS: usize = 10;
+    const NUM_THREADS: usize = 3;
     let mut handles = Vec::with_capacity(NUM_THREADS);
 
     for thread_id in 0..NUM_THREADS {
@@ -87,23 +88,25 @@ async fn authenticated_proving(
         }));
     }
 
-    // 等待任意一个线程成功获取任务
-    let proof_task = tokio::select! {
-        // 对每个handle进行处理
-        result = async {
-            let mut tasks = Vec::new();
-            for handle in handles {
-                if let Ok(result) = handle.await {
-                    if let Ok(task) = result {
-                        tasks.push(task);
-                    }
-                }
-            }
-            // 返回第一个成功的任务
-            tasks.into_iter().next()
-        } => {
-            result.ok_or("All threads failed to fetch task")?
+    // 等待第一个成功的任务
+    let proof_task = {
+        let mut success_task = None;
+        
+        // 创建一个futures的集合
+        let mut futures = futures::stream::FuturesUnordered::new();
+        for handle in handles {
+            futures.push(handle);
         }
+        
+        // 等待第一个成功的结果
+        while let Some(result) = futures.next().await {
+            if let Ok(Ok(task)) = result {
+                success_task = Some(task);
+                break;
+            }
+        }
+        
+        success_task.ok_or("All threads failed to fetch task")?
     };
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -180,6 +183,7 @@ async fn authenticated_proving(
 
     Err("Failed to submit proof after all retries".into())
 }
+
 
 fn anonymous_proving() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Instead of fetching the proof task from the orchestrator, we will use hardcoded input program and values
