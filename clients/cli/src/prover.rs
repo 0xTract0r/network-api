@@ -13,52 +13,67 @@ use sha3::{Digest, Keccak256};
 #[allow(dead_code)]
 
 use std::sync::Arc;
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{StreamExt};
 use crate::nexus_orchestrator::GetProofTaskResponse;
+use futures::stream::FuturesUnordered;
+use tokio::sync::broadcast;
 
 async fn fetch_task_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
     thread_id: usize,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>> {
     const STEP1_MAX_RETRIES: u32 = 300;
     const STEP1_TIMEOUT_SECS: u64 = 2;
     let mut fetch_retries = STEP1_MAX_RETRIES;
 
     loop {
-        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        println!(
-            "[{}] Thread {} - Fetching task (Attempt {} of {})",
-            current_time,
-            thread_id,
-            STEP1_MAX_RETRIES - fetch_retries + 1,
-            STEP1_MAX_RETRIES
-        );
+        tokio::select! {
+            // 检查是否收到取消信号
+            _ = shutdown_rx.recv() => {
+                return Err("Task cancelled - another thread succeeded".into());
+            }
+            // 正常的任务获取逻辑
+            result = async {
+                let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                println!(
+                    "[{}] Thread {} - Fetching task (Attempt {} of {})",
+                    current_time,
+                    thread_id,
+                    STEP1_MAX_RETRIES - fetch_retries + 1,
+                    STEP1_MAX_RETRIES
+                );
 
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(STEP1_TIMEOUT_SECS),
-            client.get_proof_task(node_id),
-        )
-        .await
-        {
-            Ok(Ok(task)) => {
-                println!(
-                    "[{}] Thread {} - Successfully fetched task!",
-                    current_time, thread_id
-                );
-                return Ok(task);
-            }
-            Ok(Err(e)) => {
-                println!(
-                    "[{}] Thread {} - Failed to fetch task: {}",
-                    current_time, thread_id, e
-                );
-            }
-            Err(_) => {
-                println!(
-                    "[{}] Thread {} - Request timed out after {} seconds",
-                    current_time, thread_id, STEP1_TIMEOUT_SECS
-                );
+                tokio::time::timeout(
+                    tokio::time::Duration::from_secs(STEP1_TIMEOUT_SECS),
+                    client.get_proof_task(node_id),
+                ).await
+            } => {
+                match result {
+                    Ok(Ok(task)) => {
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Successfully fetched task!",
+                            current_time, thread_id
+                        );
+                        return Ok(task);
+                    }
+                    Ok(Err(e)) => {
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Failed to fetch task: {}",
+                            current_time, thread_id, e
+                        );
+                    }
+                    Err(_) => {
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Request timed out after {} seconds",
+                            current_time, thread_id, STEP1_TIMEOUT_SECS
+                        );
+                    }
+                }
             }
         }
 
@@ -75,6 +90,9 @@ async fn authenticated_proving(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = Arc::new(OrchestratorClient::new(environment.clone()));
 
+    // 创建一个广播通道用于发送取消信号
+    let (shutdown_tx, _) = broadcast::channel(1);
+
     // 启动多个任务获取线程
     const NUM_THREADS: usize = 10;
     let mut handles = Vec::with_capacity(NUM_THREADS);
@@ -82,9 +100,10 @@ async fn authenticated_proving(
     for thread_id in 0..NUM_THREADS {
         let client = Arc::clone(&client);
         let node_id = node_id.to_string();
+        let shutdown_rx = shutdown_tx.subscribe();
         
         handles.push(tokio::spawn(async move {
-            fetch_task_with_timeout(client, &node_id, thread_id).await
+            fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx).await
         }));
     }
 
@@ -92,16 +111,17 @@ async fn authenticated_proving(
     let proof_task = {
         let mut success_task = None;
         
-        // 创建一个futures的集合
-        let mut futures = futures::stream::FuturesUnordered::new();
+        let mut futures = FuturesUnordered::new();
         for handle in handles {
             futures.push(handle);
         }
         
-        // 等待第一个成功的结果
+        
         while let Some(result) = futures.next().await {
             if let Ok(Ok(task)) = result {
                 success_task = Some(task);
+                // 发送取消信号给所有其他线程
+                let _ = shutdown_tx.send(());
                 break;
             }
         }
