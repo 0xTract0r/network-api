@@ -40,7 +40,7 @@ async fn authenticated_proving(
                 println!("[{}] Failed to fetch task: {}", current_time, e);
             },
             Err(_) => {
-                println!("[{}] Request timed out after {} seconds", current_time, FETCH_TIMEOUT_SECS);
+                println!("[{}] Request timed out after {} seconds", current_time, STEP1_TIMEOUT_SECS);
             }
         }
 
@@ -112,7 +112,7 @@ async fn authenticated_proving(
                 let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                 println!(
                     "[{}] Submit attempt timed out after {} seconds",
-                    current_time, SUBMIT_TIMEOUT_SECS
+                    current_time, STEP6_TIMEOUT_SECS
                 );
             }
         }
