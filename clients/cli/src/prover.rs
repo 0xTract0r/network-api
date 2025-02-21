@@ -18,12 +18,11 @@ use crate::nexus_orchestrator::GetProofTaskResponse;
 use futures::stream::FuturesUnordered;
 use tokio::sync::broadcast;
 
-use std::future::Future;
-
 // 配置结构体
 #[derive(Clone)]
 struct ProverConfig {
-    num_threads: usize,
+    feach_num_threads: usize,
+    submit_num_threads: usize,
     fetch_max_retries: u32,
     fetch_timeout_secs: u64,
     submit_max_retries: u32,
@@ -34,9 +33,10 @@ struct ProverConfig {
 impl Default for ProverConfig {
     fn default() -> Self {
         Self {
-            num_threads: 10,
+            feach_num_threads: 30,
             fetch_max_retries: 300,
-            fetch_timeout_secs: 2,
+            fetch_timeout_secs: 3,
+            submit_num_threads: 10,
             submit_max_retries: 120,
             submit_timeout_secs: 5,
             submit_retry_delay_secs: 1,
@@ -54,10 +54,10 @@ async fn authenticated_proving(
     // 获取任务
     let proof_task = {
         let (shutdown_tx, _) = broadcast::channel(1);
-        let mut handles = Vec::with_capacity(config.num_threads);
+        let mut handles = Vec::with_capacity(config.feach_num_threads);
         
         // 启动多个获取任务的线程
-        for thread_id in 0..config.num_threads {
+        for thread_id in 0..config.feach_num_threads {
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
             let shutdown_rx = shutdown_tx.subscribe();
@@ -116,10 +116,10 @@ async fn authenticated_proving(
     // 提交证明
     {
         let (shutdown_tx, _) = broadcast::channel(1);
-        let mut handles = Vec::with_capacity(config.num_threads);
+        let mut handles = Vec::with_capacity(config.submit_num_threads);
         
         // 启动多个提交线程
-        for thread_id in 0..config.num_threads {
+        for thread_id in 0..config.submit_num_threads {
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
             let proof_hash = proof_hash.clone();
