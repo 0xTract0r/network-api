@@ -9,14 +9,30 @@ use crate::utils;
 use colored::Colorize;
 use sha3::{Digest, Keccak256};
 
-/// Proves a program with a given node ID
-#[allow(dead_code)]
-
 use std::sync::Arc;
 use futures::{StreamExt};
 use crate::nexus_orchestrator::GetProofTaskResponse;
 use futures::stream::FuturesUnordered;
 use tokio::sync::broadcast;
+
+// 自定义错误类型
+#[derive(Debug)]
+pub struct ProverError(String);
+
+impl std::error::Error for ProverError {}
+
+impl std::fmt::Display for ProverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// 从其他错误类型转换为 ProverError
+impl<E: std::error::Error> From<E> for ProverError {
+    fn from(err: E) -> Self {
+        ProverError(err.to_string())
+    }
+}
 
 // 配置结构体
 #[derive(Clone)]
@@ -47,7 +63,7 @@ impl Default for ProverConfig {
 async fn authenticated_proving(
     node_id: &str,
     environment: &config::Environment,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), ProverError> {
     let client = Arc::new(OrchestratorClient::new(environment.clone()));
     let config = ProverConfig::default();
     
@@ -85,7 +101,7 @@ async fn authenticated_proving(
             }
         }
         
-        success_task.ok_or("All threads failed to fetch task")?
+        success_task.ok_or(ProverError("All threads failed to fetch task".to_string()))?
     };
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -99,17 +115,18 @@ async fn authenticated_proving(
         .join("assets")
         .join("fib_input");
     let prover = Stwo::<Local>::new_from_file(&elf_file_path)
-        .expect("failed to load guest program");
+        .map_err(|e| ProverError(e.to_string()))?;
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("[{}] 4. Creating ZK proof with inputs", current_time);
     let (view, proof) = prover
         .prove_with_input::<(), u32>(&(), &public_input)
-        .expect("Failed to run prover");
+        .map_err(|e| ProverError(e.to_string()))?;
 
     assert_eq!(view.exit_code().expect("failed to retrieve exit code"), 0);
 
-    let proof_bytes = serde_json::to_vec(&proof)?;
+    let proof_bytes = serde_json::to_vec(&proof)
+        .map_err(|e| ProverError(e.to_string()))?;
     let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
 
     let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -164,7 +181,7 @@ async fn authenticated_proving(
             println!("[{}] {}", current_time, "6. ZK proof successfully submitted".green());
             Ok(())
         } else {
-            Err("All threads failed to submit proof".into())
+            Err(ProverError("All threads failed to submit proof".to_string()))
         }
     }
 }
@@ -175,18 +192,18 @@ async fn fetch_task_with_timeout(
     thread_id: usize,
     mut shutdown_rx: broadcast::Receiver<()>,
     config: &ProverConfig,
-) -> Result<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<GetProofTaskResponse, ProverError> {
     let mut fetch_retries = config.fetch_max_retries;
 
     loop {
         // 每次重试前先检查是否已取消
         if shutdown_rx.try_recv().is_ok() {
-            return Err("Task cancelled - another thread succeeded".into());
+            return Err(ProverError("Task cancelled - another thread succeeded".to_string()));
         }
 
         tokio::select! {
             _ = shutdown_rx.recv() => {
-                return Err("Task cancelled - another thread succeeded".into());
+                return Err(ProverError("Task cancelled - another thread succeeded".to_string()));
             }
             result = async {
                 let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -210,7 +227,7 @@ async fn fetch_task_with_timeout(
                             thread_id,
                             "Successfully fetched task!!!".green()
                         );
-                        Ok::<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>>(task)
+                        Ok(task)
                     }
                     Ok(Err(e)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -218,7 +235,7 @@ async fn fetch_task_with_timeout(
                             "[{}] Thread {} - Failed to fetch task: {}",
                             current_time, thread_id, e
                         );
-                        Err(e.into())
+                        Err(ProverError(e.to_string()))
                     }
                     Err(_) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -226,20 +243,21 @@ async fn fetch_task_with_timeout(
                             "[{}] Thread {} - Request timed out after {} seconds",
                             current_time, thread_id, config.fetch_timeout_secs
                         );
-                        Err("Timeout".into())
+                        Err(ProverError("Timeout".to_string()))
                     }
                 }
             } => {
                 match result {
                     Ok(task) => return Ok(task),
-                    Err(_) => {}
+                    Err(e) => {
+                        if fetch_retries <= 1 {
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
 
-        if fetch_retries <= 1 {
-            return Err("Failed to fetch proof task after all retries".into());
-        }
         fetch_retries -= 1;
     }
 }
@@ -252,18 +270,18 @@ async fn submit_proof_with_timeout(
     thread_id: usize,
     mut shutdown_rx: broadcast::Receiver<()>,
     config: &ProverConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), ProverError> {
     let mut submit_retries = config.submit_max_retries;
 
     while submit_retries > 0 {
         // 每次重试前先检查是否已取消
         if shutdown_rx.try_recv().is_ok() {
-            return Err("Task cancelled - another thread succeeded".into());
+            return Err(ProverError("Task cancelled - another thread succeeded".to_string()));
         }
 
         tokio::select! {
             _ = shutdown_rx.recv() => {
-                return Err("Task cancelled - another thread succeeded".into());
+                return Err(ProverError("Task cancelled - another thread succeeded".to_string()));
             }
             result = async {
                 let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -287,7 +305,7 @@ async fn submit_proof_with_timeout(
                             thread_id,
                             "Successfully submitted proof!!!".green()
                         );
-                        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                        Ok(())
                     }
                     Ok(Err(e)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -295,7 +313,7 @@ async fn submit_proof_with_timeout(
                             "[{}] Thread {} - Failed to submit proof: {}",
                             current_time, thread_id, e
                         );
-                        Err(e.into())
+                        Err(ProverError(e.to_string()))
                     }
                     Err(_) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -303,13 +321,17 @@ async fn submit_proof_with_timeout(
                             "[{}] Thread {} - Submit timed out after {} seconds",
                             current_time, thread_id, config.submit_timeout_secs
                         );
-                        Err("Timeout".into())
+                        Err(ProverError("Timeout".to_string()))
                     }
                 }
             } => {
                 match result {
                     Ok(()) => return Ok(()),
-                    Err(_) => {}
+                    Err(e) => {
+                        if submit_retries <= 1 {
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
@@ -325,7 +347,7 @@ async fn submit_proof_with_timeout(
         }
     }
 
-    Err("Failed to submit proof after all retries".into())
+    Err(ProverError("Failed to submit proof after all retries".to_string()))
 }
 
 
