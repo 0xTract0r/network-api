@@ -205,7 +205,7 @@ async fn fetch_task_with_timeout(
                         println!(
                             "[{}] Thread {} - Successfully fetched task!!!",
                             current_time, thread_id
-                        );
+                        ).green();
                         return Ok(task);
                     }
                     Ok(Err(e)) => {
