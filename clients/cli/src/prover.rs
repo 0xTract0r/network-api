@@ -245,21 +245,31 @@ async fn authenticated_proving(
     let config = ProverConfig::default();
     
     // 获取任务
-    // 获取任务
     let proof_task = {
-        let (shutdown_tx, _) = broadcast::channel(1);  // 创建 shutdown_tx 和 shutdown_rx
+        let (shutdown_tx, _) = broadcast::channel(1);
+        let shutdown_tx = Arc::new(shutdown_tx); // 将 shutdown_tx 包装在 Arc 中
         let mut handles = Vec::with_capacity(config.feach_num_threads);
 
         for thread_id in 0..config.feach_num_threads {
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
-            let shutdown_rx = shutdown_tx.subscribe();  // 使用 subscribe 获取 shutdown_rx
+            let shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_tx = Arc::clone(&shutdown_tx);
             let config = config.clone();
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
+            // 添加随机延迟以避免所有线程同时启动
+            let delay = rand::random::<u64>() % 100;
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
 
             handles.push(tokio::spawn(async move {
-                fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx, shutdown_tx.clone(), &config).await
+                fetch_task_with_timeout(
+                    client,
+                    &node_id,
+                    thread_id,
+                    shutdown_rx,
+                    (*shutdown_tx).clone(),
+                    &config
+                ).await
             }));
         }
 
@@ -270,48 +280,31 @@ async fn authenticated_proving(
 
         let mut success_task = None;
         while let Some(result) = futures.next().await {
-            if let Ok(Ok(task)) = result {
-                success_task = Some(task);
-                let _ = shutdown_tx.send(());  // 一旦获取到任务，发送停止信号
-                break;
+            match result {
+                Ok(Ok(task)) => {
+                    success_task = Some(task);
+                    let _ = shutdown_tx.send(()); // 发送停止信号给所有线程
+                    break;
+                }
+                Ok(Err(_)) => continue, // 忽略单个线程的错误
+                Err(_) => continue,     // 忽略 JoinError
             }
         }
+
+        // 等待一小段时间确保其他线程收到停止信号
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         success_task.ok_or_else(|| ProverError::new("All threads failed to fetch task"))?
     };
 
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 2. Received a task to prove from Nexus Orchestrator...", current_time);
-
-    let public_input: u32 = proof_task.public_inputs[0] as u32;
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 3. Compiling guest program...", current_time);
-    let elf_file_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("fib_input");
-    let prover = Stwo::<Local>::new_from_file(&elf_file_path)
-        .map_err(|e| ProverError::new(e.to_string()))?;
-
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] 4. Creating ZK proof with inputs", current_time);
-    let (view, proof) = prover
-        .prove_with_input::<(), u32>(&(), &public_input)
-        .map_err(|e| ProverError::new(e.to_string()))?;
-
-    assert_eq!(view.exit_code().expect("failed to retrieve exit code"), 0);
-
+    // 提交证明部分的类似修改
     let proof_bytes = serde_json::to_vec(&proof)
         .map_err(|e| ProverError::new(e.to_string()))?;
     let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
 
-    let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-    println!("[{}] \tProof size: {} bytes", current_time, proof_bytes.len());
-    
-    // 提交证明
     {
         let (shutdown_tx, _) = broadcast::channel(1);
+        let shutdown_tx = Arc::new(shutdown_tx);
         let mut handles = Vec::with_capacity(config.submit_num_threads);
         
         for thread_id in 0..config.submit_num_threads {
@@ -320,9 +313,11 @@ async fn authenticated_proving(
             let proof_hash = proof_hash.clone();
             let proof_bytes = proof_bytes.clone();
             let shutdown_rx = shutdown_tx.subscribe();
+            let shutdown_tx = Arc::clone(&shutdown_tx);
             let config = config.clone();
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
+            let delay = rand::random::<u64>() % 100;
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
 
             handles.push(tokio::spawn(async move {
                 submit_proof_with_timeout(
@@ -344,12 +339,18 @@ async fn authenticated_proving(
 
         let mut success = false;
         while let Some(result) = futures.next().await {
-            if let Ok(Ok(_)) = result {
-                success = true;
-                let _ = shutdown_tx.send(());
-                break;
+            match result {
+                Ok(Ok(_)) => {
+                    success = true;
+                    let _ = shutdown_tx.send(());
+                    break;
+                }
+                Ok(Err(_)) | Err(_) => continue,
             }
         }
+
+        // 等待一小段时间确保其他线程收到停止信号
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         if success {
             let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
