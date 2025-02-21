@@ -210,7 +210,7 @@ async fn fetch_task_with_timeout(
                             thread_id,
                             "Successfully fetched task!!!".green()
                         );
-                        Ok(task)
+                        Ok::<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>>(task)
                     }
                     Ok(Err(e)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -287,7 +287,7 @@ async fn submit_proof_with_timeout(
                             thread_id,
                             "Successfully submitted proof!!!".green()
                         );
-                        Ok(())
+                        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
                     }
                     Ok(Err(e)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
