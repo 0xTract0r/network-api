@@ -224,13 +224,6 @@ async fn submit_proof_with_timeout(
         }
 
         submit_retries -= 1;
-        if submit_retries > 0 {
-            let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            println!(
-                "[{}] Thread {} - Retrying in {} seconds...", 
-                current_time, thread_id, config.submit_retry_delay_secs
-            );
-        }
     }
 
     Err(ProverError::new("Failed to submit proof after all retries"))
@@ -334,6 +327,7 @@ async fn authenticated_proving(
             let proof_hash = proof_hash.clone();
             let proof_bytes = proof_bytes.clone();
             let shutdown_rx = shutdown_tx.subscribe();
+            let config = config.clone();  // 克隆config
             // 直接在调用时克隆，避免中间变量
             
             let delay = rand::random::<u64>() % 100;
