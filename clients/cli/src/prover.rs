@@ -11,8 +11,11 @@ use sha3::{Digest, Keccak256};
 
 /// Proves a program with a given node ID
 #[allow(dead_code)]
+
+use std::sync::Arc;
+
 async fn fetch_task_with_timeout(
-    client: OrchestratorClient,
+    client: Arc<OrchestratorClient>,
     node_id: &str,
     thread_id: usize,
 ) -> Result<ProofTask, Box<dyn std::error::Error + Send + Sync>> {
@@ -68,18 +71,18 @@ async fn authenticated_proving(
     node_id: &str,
     environment: &config::Environment,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = OrchestratorClient::new(environment.clone());
+    let client = Arc::new(OrchestratorClient::new(environment.clone()));
 
     // 启动多个任务获取线程
-    const NUM_THREADS: usize = 10;
+    const NUM_THREADS: usize = 3;
     let mut handles = Vec::with_capacity(NUM_THREADS);
 
     for thread_id in 0..NUM_THREADS {
-        let client_clone = client.clone();
+        let client = Arc::clone(&client);
         let node_id = node_id.to_string();
         
         handles.push(tokio::spawn(async move {
-            fetch_task_with_timeout(client_clone, &node_id, thread_id).await
+            fetch_task_with_timeout(client, &node_id, thread_id).await
         }));
     }
 
