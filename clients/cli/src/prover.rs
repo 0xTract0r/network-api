@@ -58,16 +58,15 @@ async fn authenticated_proving(
         
         // 启动多个获取任务的线程
         for thread_id in 0..config.feach_num_threads {
+            let client = Arc::clone(&client);
+            let node_id = node_id.to_string();
+            let shutdown_rx = shutdown_tx.subscribe();
+            let config = config.clone();
+
             tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 100)).await;
             
             handles.push(tokio::spawn(async move {
-                fetch_task_with_timeout(
-                    Arc::clone(&client), 
-                    &node_id.to_string(),
-                    thread_id,
-                    shutdown_tx.subscribe(),
-                    &config.clone()
-                ).await
+                fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx, &config).await
             }));
         }
 
@@ -123,17 +122,24 @@ async fn authenticated_proving(
         
         // 启动多个提交线程
         for thread_id in 0..config.submit_num_threads {
-            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 100)).await;
+            let client = Arc::clone(&client);
+            let node_id = node_id.to_string();
+            let proof_hash = proof_hash.clone();
+            let proof_bytes = proof_bytes.clone();
+            let shutdown_rx = shutdown_tx.subscribe();
+            let config = config.clone();
             
+            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 100)).await;
+
             handles.push(tokio::spawn(async move {
                 submit_proof_with_timeout(
-                    Arc::clone(&client),
-                    &node_id.to_string(),
-                    proof_hash.clone(),
-                    proof_bytes.clone(),
+                    client, 
+                    &node_id,
+                    proof_hash,
+                    proof_bytes,
                     thread_id,
-                    shutdown_tx.subscribe(),
-                    &config.clone()
+                    shutdown_rx,
+                    &config
                 ).await
             }));
         }
