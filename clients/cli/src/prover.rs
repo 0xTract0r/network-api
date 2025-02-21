@@ -67,7 +67,8 @@ async fn fetch_task_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
     thread_id: usize,
-    mut shutdown_rx: broadcast::Receiver<()>,
+    mut shutdown_rx: broadcast::Receiver<()>,  // This is the receiver
+    shutdown_tx: broadcast::Sender<()>,        // This is the sender
     config: &ProverConfig,
 ) -> Result<GetProofTaskResponse, ProverError> {
     let mut fetch_retries = config.fetch_max_retries;
@@ -132,7 +133,7 @@ async fn fetch_task_with_timeout(
                             "[{}] Thread {} - Task fetched, sending shutdown signal to other threads.",
                             current_time, thread_id
                         );
-                        let _ = shutdown_rx.send(());
+                        let _ = shutdown_tx.send(());  // Send signal using Sender
                         return Ok(task);
                     },
                     Err(e) => {
