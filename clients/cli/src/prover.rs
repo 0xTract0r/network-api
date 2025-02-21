@@ -256,7 +256,7 @@ async fn authenticated_proving(
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
             let shutdown_rx = shutdown_tx.subscribe();
-            let shutdown_tx = Arc::clone(&shutdown_tx);
+            let _shutdown_tx = Arc::clone(&shutdown_tx);  // 需要下划线，因为创建了新变量
             let config = config.clone();
 
             let delay = rand::random::<u64>() % 100;
