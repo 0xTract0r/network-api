@@ -203,8 +203,10 @@ async fn fetch_task_with_timeout(
                     Ok(Ok(task)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                         println!(
-                            "[{}] Thread {} - Successfully fetched task!!!".green(),
-                            current_time, thread_id
+                            "[{}] Thread {} - {}",
+                            current_time, 
+                            thread_id,
+                            "Successfully fetched task!!!".green()
                         );
                         return Ok(task);
                     }
