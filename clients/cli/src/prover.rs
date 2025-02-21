@@ -46,7 +46,6 @@ struct ProverConfig {
     fetch_timeout_secs: u64,
     submit_max_retries: u32,
     submit_timeout_secs: u64,
-    submit_retry_delay_secs: u64,
 }
 
 impl Default for ProverConfig {
@@ -55,10 +54,9 @@ impl Default for ProverConfig {
             feach_num_threads: 30,
             fetch_max_retries: 300,
             fetch_timeout_secs: 3,
-            submit_num_threads: 10,
-            submit_max_retries: 200,
+            submit_num_threads: 30,
+            submit_max_retries: 300,
             submit_timeout_secs: 3,
-            submit_retry_delay_secs: 1,
         }
     }
 }
@@ -232,7 +230,6 @@ async fn submit_proof_with_timeout(
                 "[{}] Thread {} - Retrying in {} seconds...", 
                 current_time, thread_id, config.submit_retry_delay_secs
             );
-            tokio::time::sleep(tokio::time::Duration::from_secs(config.submit_retry_delay_secs)).await;
         }
     }
 
