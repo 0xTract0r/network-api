@@ -73,6 +73,7 @@ async fn fetch_task_with_timeout(
     let mut fetch_retries = config.fetch_max_retries;
 
     loop {
+        // Check for shutdown signal to terminate thread
         if shutdown_rx.try_recv().is_ok() {
             return Err(ProverError::new("Task cancelled - another thread succeeded"));
         }
@@ -124,7 +125,16 @@ async fn fetch_task_with_timeout(
                 }
             } => {
                 match result {
-                    Ok(task) => return Ok(task),
+                    Ok(task) => {
+                        // Once a thread succeeds, stop others
+                        let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                        println!(
+                            "[{}] Thread {} - Task fetched, sending shutdown signal to other threads.",
+                            current_time, thread_id
+                        );
+                        let _ = shutdown_rx.send(());
+                        return Ok(task);
+                    },
                     Err(e) => {
                         if fetch_retries <= 1 {
                             return Err(e);
@@ -137,6 +147,7 @@ async fn fetch_task_with_timeout(
         fetch_retries -= 1;
     }
 }
+
 
 async fn submit_proof_with_timeout(
     client: Arc<OrchestratorClient>,
