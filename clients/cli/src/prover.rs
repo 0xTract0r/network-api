@@ -13,12 +13,13 @@ use sha3::{Digest, Keccak256};
 #[allow(dead_code)]
 
 use std::sync::Arc;
+use crate::nexus_orchestrator::GetProofTaskResponse;
 
 async fn fetch_task_with_timeout(
     client: Arc<OrchestratorClient>,
     node_id: &str,
     thread_id: usize,
-) -> Result<ProofTask, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>> {
     const STEP1_MAX_RETRIES: u32 = 300;
     const STEP1_TIMEOUT_SECS: u64 = 2;
     let mut fetch_retries = STEP1_MAX_RETRIES;
