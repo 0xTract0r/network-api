@@ -239,14 +239,13 @@ async fn authenticated_proving(
     // 获取任务
     let proof_task = {
         let (shutdown_tx, _) = broadcast::channel(1);
-        let shutdown_tx = Arc::new(shutdown_tx); // 将 shutdown_tx 包装在 Arc 中
+        let shutdown_tx = Arc::new(shutdown_tx);
         let mut handles = Vec::with_capacity(config.feach_num_threads);
 
         for thread_id in 0..config.feach_num_threads {
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
             let shutdown_rx = shutdown_tx.subscribe();
-            let _shutdown_tx = Arc::clone(&shutdown_tx);  // 需要下划线，因为创建了新变量
             let config = config.clone();
 
             let delay = rand::random::<u64>() % 100;
