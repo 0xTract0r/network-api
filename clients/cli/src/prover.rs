@@ -37,8 +37,8 @@ impl Default for ProverConfig {
             fetch_max_retries: 300,
             fetch_timeout_secs: 3,
             submit_num_threads: 10,
-            submit_max_retries: 120,
-            submit_timeout_secs: 5,
+            submit_max_retries: 200,
+            submit_timeout_secs: 3,
             submit_retry_delay_secs: 1,
         }
     }
@@ -63,7 +63,7 @@ async fn authenticated_proving(
             let shutdown_rx = shutdown_tx.subscribe();
             let config = config.clone();
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
             
             handles.push(tokio::spawn(async move {
                 fetch_task_with_timeout(client, &node_id, thread_id, shutdown_rx, &config).await
@@ -129,7 +129,7 @@ async fn authenticated_proving(
             let shutdown_rx = shutdown_tx.subscribe();
             let config = config.clone();
             
-            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
 
             handles.push(tokio::spawn(async move {
                 submit_proof_with_timeout(
