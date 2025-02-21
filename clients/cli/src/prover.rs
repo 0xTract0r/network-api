@@ -129,8 +129,6 @@ async fn authenticated_proving(
             let shutdown_rx = shutdown_tx.subscribe();
             let config = config.clone();
             
-            tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
-
             handles.push(tokio::spawn(async move {
                 submit_proof_with_timeout(
                     client, 
@@ -179,6 +177,8 @@ async fn fetch_task_with_timeout(
 ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error + Send + Sync>> {
     let mut fetch_retries = config.fetch_max_retries;
 
+    tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
+
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
@@ -203,7 +203,7 @@ async fn fetch_task_with_timeout(
                     Ok(Ok(task)) => {
                         let current_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                         println!(
-                            "[{}] Thread {} - Successfully fetched task!",
+                            "[{}] Thread {} - Successfully fetched task!!!",
                             current_time, thread_id
                         );
                         return Ok(task);
@@ -244,6 +244,8 @@ async fn submit_proof_with_timeout(
     config: &ProverConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut submit_retries = config.submit_max_retries;
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(thread_id as u64 * 15)).await;
 
     while submit_retries > 0 {
         tokio::select! {
