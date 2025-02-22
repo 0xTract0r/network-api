@@ -229,6 +229,7 @@ async fn submit_proof_with_timeout(
     Err(ProverError::new("Failed to submit proof after all retries"))
 }
 
+
 async fn authenticated_proving(
     node_id: &str,
     environment: &config::Environment,
