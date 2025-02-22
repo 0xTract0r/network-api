@@ -245,6 +245,7 @@ async fn authenticated_proving(
         for thread_id in 0..config.feach_num_threads {
             let client = Arc::clone(&client);
             let node_id = node_id.to_string();
+            let shutdown_tx = Arc::clone(&shutdown_tx);  // 在循环中克隆 Arc
             let shutdown_rx = shutdown_tx.subscribe();
             let config = config.clone();
 
